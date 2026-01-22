@@ -28,9 +28,13 @@ impl PortugueseEvaluator {
             config::PORTUGUESE_MODEL_ID
         );
 
-        let model_path = config::PORTUGUESE_MODEL.path(Path::new("./models"));
+        let models_dir = Path::new("./models");
+        let model_path = config::PORTUGUESE_MODEL.path(models_dir);
 
         println!("   Loading from: {:?}", model_path);
+
+        // Verify all required files exist
+        config::PORTUGUESE_MODEL.verify_files(models_dir)?;
 
         // Use local model files
         let local_config = model_path.join("config.json");
@@ -38,16 +42,6 @@ impl PortugueseEvaluator {
         let local_vocab = model_path.join("vocab.json");
         let local_merges = model_path.join("merges.txt");
         let local_tokenizer_config = model_path.join("tokenizer_config.json");
-
-        // Check if model files exist
-        if !local_config.exists() || !local_model.exists() {
-            anyhow::bail!(
-                "Portuguese evaluation model not found at {:?}\n\n\
-                Please download models first using:\n  \
-                cargo run --release -- --download-models",
-                model_path
-            );
-        }
 
         // Load configuration from local path
         let config: Config = serde_json::from_reader(std::fs::File::open(&local_config)?)?;

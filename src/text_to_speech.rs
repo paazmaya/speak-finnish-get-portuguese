@@ -2,10 +2,11 @@ use anyhow::{Error as E, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::parler_tts::{Config, Model};
-use hf_hub::api::sync::Api;
 use hound::{WavSpec, WavWriter};
 use std::path::Path;
 use tokenizers::Tokenizer;
+
+use crate::config;
 
 pub struct PortugueseTTS {
     model: Model,
@@ -15,25 +16,19 @@ pub struct PortugueseTTS {
 }
 
 impl PortugueseTTS {
-    pub fn new(device: Device) -> Result<Self> {
-        println!("Loading Portuguese Parler-TTS model from HuggingFace Hub...");
+    pub fn new(device: Device, models_dir: &Path) -> Result<Self> {
+        println!("Loading Portuguese Parler-TTS model from local directory...");
 
-        let api = Api::new()?;
-        let model_id = "freds0/parler-tts-mini-v1.1-ptbr";
-        let revision = "main";
+        let model_path = config::PARLER_TTS_MODEL.path(models_dir);
 
-        let repo = api.repo(hf_hub::Repo::with_revision(
-            model_id.to_string(),
-            hf_hub::RepoType::Model,
-            revision.to_string(),
-        ));
+        // Verify all required files exist
+        config::PARLER_TTS_MODEL.verify_files(models_dir)?;
 
-        // Load model files
-        let model_file = repo.get("model.safetensors")?;
-        let config_file = repo.get("config.json")?;
-        let tokenizer_file = repo.get("tokenizer.json")?;
+        let model_file = model_path.join("model.safetensors");
+        let config_file = model_path.join("config.json");
+        let tokenizer_file = model_path.join("tokenizer.json");
 
-        println!("Retrieved model files");
+        println!("Loading model files from: {:?}", model_path);
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(E::msg)?;

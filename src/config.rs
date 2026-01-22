@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 pub const FINNISH_MODEL_ID: &str = "Finnish-NLP/whisper-tiny-finnish";
 pub const PORTUGUESE_MODEL_ID: &str = "dominguesm/whisper-tiny-pt";
 pub const PARLER_TTS_MODEL_ID: &str = "freds0/parler-tts-mini-v1.1-ptbr";
-pub const TRANSLATION_FI_EN_MODEL_ID: &str = "Helsinki-NLP/opus-tatoeba-fi-en";
-pub const TRANSLATION_EN_PT_MODEL_ID: &str = "Helsinki-NLP/opus-mt-tc-big-en-pt";
+// MADLAD-400 supports 400+ languages including Finnish to Portuguese
+pub const TRANSLATION_MODEL_ID: &str = "google/madlad400-3b-mt";
 
 /// Model configuration describing files needed for each model
 pub struct ModelConfig {
@@ -25,6 +25,32 @@ impl ModelConfig {
     /// Get full path to model directory
     pub fn path(&self, base_dir: &Path) -> PathBuf {
         base_dir.join(self.subdir())
+    }
+
+    /// Check if all required model files exist
+    /// Returns Ok(()) if all files exist, Err with descriptive message otherwise
+    pub fn verify_files(&self, base_dir: &Path) -> Result<()> {
+        let model_path = self.path(base_dir);
+
+        let mut missing_files = Vec::new();
+        for &filename in self.files {
+            let file_path = model_path.join(filename);
+            if !file_path.exists() {
+                missing_files.push(filename);
+            }
+        }
+
+        if !missing_files.is_empty() {
+            anyhow::bail!(
+                "Missing model files for {}:\n  {}\n\n\
+                Please download models first using:\n  \
+                cargo run --release -- --download-models",
+                self.id,
+                missing_files.join("\n  ")
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -52,27 +78,10 @@ pub const PARLER_TTS_MODEL: ModelConfig = ModelConfig {
     files: &["config.json", "model.safetensors", "tokenizer.json"],
 };
 
-/// Configuration for Translation model Stage 1 (Finnish to English)
-pub const TRANSLATION_FI_EN_MODEL: ModelConfig = ModelConfig {
-    id: TRANSLATION_FI_EN_MODEL_ID,
-    files: &[
-        "config.json",
-        "model.safetensors",
-        "tokenizer_config.json",
-        "vocab.json",
-    ],
-};
-
-/// Configuration for Translation model Stage 2 (English to Portuguese)
-pub const TRANSLATION_EN_PT_MODEL: ModelConfig = ModelConfig {
-    id: TRANSLATION_EN_PT_MODEL_ID,
-    files: &[
-        "config.json",
-        "model.safetensors",
-        "source.spm",
-        "target.spm",
-        "vocab.json",
-    ],
+/// Configuration for MADLAD-400 Translation model (using quantized GGUF)
+pub const TRANSLATION_MODEL: ModelConfig = ModelConfig {
+    id: TRANSLATION_MODEL_ID,
+    files: &["model-q2k.gguf", "tokenizer.json", "config.json"],
 };
 
 /// Download a model from HuggingFace to the specified directory
@@ -149,25 +158,19 @@ pub fn download_all_models(models_dir: &Path) -> Result<()> {
 
     println!();
 
-    // Download Translation model (Stage 1: Finnish -> English)
-    let (dl4, sk4) = download_model(&TRANSLATION_FI_EN_MODEL, models_dir, &api)?;
-
-    println!();
-
-    // Download Translation model (Stage 2: English -> Portuguese)
-    let (dl5, sk5) = download_model(&TRANSLATION_EN_PT_MODEL, models_dir, &api)?;
+    // Download T5 Translation model
+    let (dl4, sk4) = download_model(&TRANSLATION_MODEL, models_dir, &api)?;
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("✅ All downloads complete!");
-    println!("   Downloaded: {}", dl1 + dl2 + dl3 + dl4 + dl5);
-    println!("   Skipped: {}", sk1 + sk2 + sk3 + sk4 + sk5);
+    println!("   Downloaded: {}", dl1 + dl2 + dl3 + dl4);
+    println!("   Skipped: {}", sk1 + sk2 + sk3 + sk4);
     println!(
         "   Total: {}\n",
         FINNISH_MODEL.files.len()
             + PORTUGUESE_MODEL.files.len()
             + PARLER_TTS_MODEL.files.len()
-            + TRANSLATION_FI_EN_MODEL.files.len()
-            + TRANSLATION_EN_PT_MODEL.files.len()
+            + TRANSLATION_MODEL.files.len()
     );
 
     Ok(())

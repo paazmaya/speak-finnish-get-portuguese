@@ -12,7 +12,6 @@ candle-transformers = "0.9.2-alpha.2"
 # HuggingFace Hub integration
 hf-hub = "0.4"
 tokenizers = "0.21"
-sentencepiece = "0.11"
 
 # Audio processing
 hound = "3.5"  # WAV encoding/decoding

@@ -9,6 +9,8 @@ A Rust-based speech translation pipeline using the Candle ML framework that:
 
 Supports both single-file recording and segmented recording mode where you can press space to save each sentence separately.
 
+![Female elf waving Brazilian flag](./logo.jpg)
+
 ## Architecture
 
 The pipeline processes audio through four stages:

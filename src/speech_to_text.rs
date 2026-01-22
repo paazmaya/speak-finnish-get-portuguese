@@ -23,35 +23,12 @@ impl WhisperSpeechToText {
         let model_path = config::FINNISH_MODEL.path(models_dir);
         println!("Loading Whisper model from: {:?}", model_path);
 
+        // Verify all required files exist
+        config::FINNISH_MODEL.verify_files(models_dir)?;
+
         let config_filename = model_path.join("config.json");
         let tokenizer_filename = model_path.join("tokenizer.json");
         let weights_filename = model_path.join("model.safetensors");
-
-        // Check if all required files exist
-        if !config_filename.exists() {
-            anyhow::bail!(
-                "Model file not found: {:?}\n\n\
-                Please download models first using:\n  \
-                cargo run --release -- --download-models",
-                config_filename
-            );
-        }
-        if !tokenizer_filename.exists() {
-            anyhow::bail!(
-                "Model file not found: {:?}\n\n\
-                Please download models first using:\n  \
-                cargo run --release -- --download-models",
-                tokenizer_filename
-            );
-        }
-        if !weights_filename.exists() {
-            anyhow::bail!(
-                "Model file not found: {:?}\n\n\
-                Please download models first using:\n  \
-                cargo run --release -- --download-models",
-                weights_filename
-            );
-        }
 
         let config: Config = serde_json::from_reader(std::fs::File::open(&config_filename)?)?;
         let tokenizer = Tokenizer::from_file(&tokenizer_filename).map_err(anyhow::Error::msg)?;

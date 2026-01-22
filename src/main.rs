@@ -145,17 +145,26 @@ fn translate_text(finnish_text: &str, device: &Device, models_dir: &Path) -> Res
 }
 
 /// Synthesize Portuguese speech from text using TTS
-fn synthesize_speech(portuguese_text: &str, device: &Device) -> Result<Vec<f32>> {
+fn synthesize_speech(
+    portuguese_text: &str,
+    device: &Device,
+    models_dir: &Path,
+) -> Result<Vec<f32>> {
     println!("Step 4: Synthesizing Portuguese speech...");
-    let mut tts = text_to_speech::PortugueseTTS::new(device.clone())?;
+    let mut tts = text_to_speech::PortugueseTTS::new(device.clone(), models_dir)?;
     let audio_output = tts.synthesize(portuguese_text)?;
     Ok(audio_output)
 }
 
 /// Save audio samples to WAV file
-fn save_output_audio(audio_output: &[f32], output_path: &str, device: &Device) -> Result<()> {
+fn save_output_audio(
+    audio_output: &[f32],
+    output_path: &str,
+    device: &Device,
+    models_dir: &Path,
+) -> Result<()> {
     println!("Step 5: Saving output audio...");
-    let tts = text_to_speech::PortugueseTTS::new(device.clone())?;
+    let tts = text_to_speech::PortugueseTTS::new(device.clone(), models_dir)?;
     tts.save_wav(audio_output, output_path)?;
     Ok(())
 }
@@ -206,7 +215,7 @@ fn process_segmented_recording(args: &Args, device: &Device) -> Result<()> {
         let portuguese_text = translate_text(&finnish_text, device, &args.models_dir)?;
 
         // Synthesize
-        let audio_output = synthesize_speech(&portuguese_text, device)?;
+        let audio_output = synthesize_speech(&portuguese_text, device, &args.models_dir)?;
 
         // Save with incremental filename
         let output_filename = if args.output.ends_with(".wav") {
@@ -215,7 +224,7 @@ fn process_segmented_recording(args: &Args, device: &Device) -> Result<()> {
         } else {
             format!("{}_{:03}.wav", args.output, segment_num)
         };
-        save_output_audio(&audio_output, &output_filename, device)?;
+        save_output_audio(&audio_output, &output_filename, device, &args.models_dir)?;
 
         print_results(
             &finnish_text,
@@ -283,8 +292,8 @@ fn main() -> Result<()> {
 
     // Translate and synthesize
     let portuguese_text = translate_text(&finnish_text, &device, &args.models_dir)?;
-    let audio_output = synthesize_speech(&portuguese_text, &device)?;
-    save_output_audio(&audio_output, &args.output, &device)?;
+    let audio_output = synthesize_speech(&portuguese_text, &device, &args.models_dir)?;
+    save_output_audio(&audio_output, &args.output, &device, &args.models_dir)?;
 
     print_results(
         &finnish_text,
