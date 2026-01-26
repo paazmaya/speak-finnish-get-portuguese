@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 /// Model configuration constants
 pub const FINNISH_MODEL_ID: &str = "Finnish-NLP/whisper-tiny-finnish";
 pub const PORTUGUESE_MODEL_ID: &str = "dominguesm/whisper-tiny-pt";
-pub const PARLER_TTS_MODEL_ID: &str = "freds0/parler-tts-mini-v1.1-ptbr";
+pub const KOKORO_TTS_MODEL_ID: &str = "onnx-community/Kokoro-82M-v1.0-ONNX";
+pub const KOKORO_VOICES_REPO: &str = "hexgrad/Kokoro-82M";
 // MADLAD-400 supports 400+ languages including Finnish to Portuguese
 pub const TRANSLATION_MODEL_ID: &str = "google/madlad400-3b-mt";
 
@@ -72,10 +73,20 @@ pub const PORTUGUESE_MODEL: ModelConfig = ModelConfig {
     ],
 };
 
-/// Configuration for Parler TTS model (Portuguese text-to-speech)
-pub const PARLER_TTS_MODEL: ModelConfig = ModelConfig {
-    id: PARLER_TTS_MODEL_ID,
-    files: &["config.json", "model.safetensors", "tokenizer.json"],
+/// Configuration for Kokoro TTS model (Portuguese text-to-speech)
+pub const KOKORO_TTS_MODEL: ModelConfig = ModelConfig {
+    id: KOKORO_TTS_MODEL_ID,
+    files: &[
+        "onnx/model.onnx",
+        "config.json",
+        "tokenizer_minimal.json",
+    ],
+};
+
+/// Configuration for Kokoro voices (contains voice files)
+pub const KOKORO_VOICES: ModelConfig = ModelConfig {
+    id: KOKORO_VOICES_REPO,
+    files: &["voices/pf_dora.pt"],  // Brazilian Portuguese female voice
 };
 
 /// Configuration for MADLAD-400 Translation model (using quantized GGUF)
@@ -115,6 +126,11 @@ pub fn download_model(
             );
             skipped += 1;
         } else {
+            // Create parent directories if the filename contains path separators
+            if let Some(parent) = local_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            
             println!("  ⬇️  Downloading {}...", filename);
             let remote_file = repo.get(filename)?;
             fs::copy(&remote_file, &local_path)?;
@@ -153,23 +169,29 @@ pub fn download_all_models(models_dir: &Path) -> Result<()> {
 
     println!();
 
-    // Download Parler TTS model
-    let (dl3, sk3) = download_model(&PARLER_TTS_MODEL, models_dir, &api)?;
+    // Download Kokoro TTS model
+    let (dl3, sk3) = download_model(&KOKORO_TTS_MODEL, models_dir, &api)?;
 
     println!();
 
-    // Download T5 Translation model
-    let (dl4, sk4) = download_model(&TRANSLATION_MODEL, models_dir, &api)?;
+    // Download Kokoro voices
+    let (dl4, sk4) = download_model(&KOKORO_VOICES, models_dir, &api)?;
+
+    println!();
+
+    // Download Translation model
+    let (dl5, sk5) = download_model(&TRANSLATION_MODEL, models_dir, &api)?;
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("✅ All downloads complete!");
-    println!("   Downloaded: {}", dl1 + dl2 + dl3 + dl4);
-    println!("   Skipped: {}", sk1 + sk2 + sk3 + sk4);
+    println!("   Downloaded: {}", dl1 + dl2 + dl3 + dl4 + dl5);
+    println!("   Skipped: {}", sk1 + sk2 + sk3 + sk4 + sk5);
     println!(
         "   Total: {}\n",
         FINNISH_MODEL.files.len()
             + PORTUGUESE_MODEL.files.len()
-            + PARLER_TTS_MODEL.files.len()
+            + KOKORO_TTS_MODEL.files.len()
+            + KOKORO_VOICES.files.len()
             + TRANSLATION_MODEL.files.len()
     );
 
