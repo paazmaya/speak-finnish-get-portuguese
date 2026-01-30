@@ -1,0 +1,7 @@
+# Ignore audio test files (can be large and may contain voice recordings)
+*.wav
+*.mp3
+*.flac
+
+# But keep the generation script
+!create_test_audio.py
