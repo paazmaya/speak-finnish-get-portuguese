@@ -4,14 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Model configuration constants
-pub const FINNISH_MODEL_ID: &str = "Finnish-NLP/whisper-tiny-finnish";
-pub const PORTUGUESE_MODEL_ID: &str = "dominguesm/whisper-tiny-pt";
-pub const KOKORO_TTS_MODEL_ID: &str = "onnx-community/Kokoro-82M-v1.0-ONNX";
-pub const KOKORO_VOICES_REPO: &str = "hexgrad/Kokoro-82M";
-// MADLAD-400 supports 400+ languages including Finnish to Portuguese
+pub const QWEN3_TTS_MODEL_ID: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 pub const TRANSLATION_MODEL_ID: &str = "google/madlad400-3b-mt";
 
-/// Model configuration describing files needed for each model
+/// Model configuration describing files needed for the model
 pub struct ModelConfig {
     pub id: &'static str,
     pub files: &'static [&'static str],
@@ -44,7 +40,7 @@ impl ModelConfig {
         if !missing_files.is_empty() {
             anyhow::bail!(
                 "Missing model files for {}:\n  {}\n\n\
-                Please download models first using:\n  \
+                Please download the model first using:\n  \
                 cargo run --release -- --download-models",
                 self.id,
                 missing_files.join("\n  ")
@@ -55,145 +51,105 @@ impl ModelConfig {
     }
 }
 
-/// Configuration for Finnish Whisper model
-pub const FINNISH_MODEL: ModelConfig = ModelConfig {
-    id: FINNISH_MODEL_ID,
-    files: &["config.json", "model.safetensors", "tokenizer.json"],
-};
-
-/// Configuration for Portuguese Whisper model (for evaluation)
-pub const PORTUGUESE_MODEL: ModelConfig = ModelConfig {
-    id: PORTUGUESE_MODEL_ID,
+/// Configuration for Qwen3-TTS model (Portuguese text-to-speech)
+pub const QWEN3_TTS_MODEL: ModelConfig = ModelConfig {
+    id: QWEN3_TTS_MODEL_ID,
     files: &[
         "config.json",
         "model.safetensors",
         "vocab.json",
         "merges.txt",
         "tokenizer_config.json",
+        "speech_tokenizer/config.json",
+        "speech_tokenizer/model.safetensors",
     ],
 };
 
-/// Configuration for Kokoro TTS model (Portuguese text-to-speech)
-pub const KOKORO_TTS_MODEL: ModelConfig = ModelConfig {
-    id: KOKORO_TTS_MODEL_ID,
-    files: &[
-        "onnx/model.onnx",
-        "config.json",
-        "tokenizer_minimal.json",
-    ],
-};
-
-/// Configuration for Kokoro voices (contains voice files)
-pub const KOKORO_VOICES: ModelConfig = ModelConfig {
-    id: KOKORO_VOICES_REPO,
-    files: &["voices/pf_dora.pt"],  // Brazilian Portuguese female voice
-};
-
-/// Configuration for MADLAD-400 Translation model (using quantized GGUF)
+/// Configuration for MADLAD-400 translation model (Finnish to Portuguese)
 pub const TRANSLATION_MODEL: ModelConfig = ModelConfig {
     id: TRANSLATION_MODEL_ID,
-    files: &["model-q2k.gguf", "tokenizer.json", "config.json"],
+    files: &["config.json", "model-q2k.gguf", "tokenizer.json"],
 };
 
-/// Download a model from HuggingFace to the specified directory
-pub fn download_model(
-    model_config: &ModelConfig,
-    base_dir: &Path,
+/// Download a single model file from HuggingFace Hub
+fn download_model_file(
     api: &hf_hub::api::sync::Api,
-) -> Result<(usize, usize)> {
-    let model_path = model_config.path(base_dir);
+    repo_id: &str,
+    filename: &str,
+    target_dir: &Path,
+) -> Result<PathBuf> {
+    println!("  Downloading: {}", filename);
+    let repo = api.model(repo_id.to_string());
+    let file = repo.get(filename)?;
 
-    println!("Downloading: {}", model_config.id);
-    println!("Target: {:?}\n", model_path);
+    // Copy to target directory with proper structure
+    let target_path = target_dir.join(filename);
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&file, &target_path)?;
 
-    // Create model subdirectory
-    fs::create_dir_all(&model_path)?;
+    Ok(target_path)
+}
 
-    let repo = api.model(model_config.id.to_string());
+/// Download Qwen3-TTS model from HuggingFace Hub
+pub fn download_qwen3_model(models_dir: &Path) -> Result<()> {
+    println!("\n🔽 Downloading Qwen3-TTS model...");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    let mut downloaded = 0;
-    let mut skipped = 0;
+    let target_dir = QWEN3_TTS_MODEL.path(models_dir);
+    fs::create_dir_all(&target_dir)?;
 
-    for filename in model_config.files {
-        let local_path = model_path.join(filename);
+    let api = ApiBuilder::new()
+        .with_progress(true)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize HuggingFace API: {}", e))?;
 
-        if local_path.exists() {
-            let file_size = fs::metadata(&local_path)?.len();
-            let size_mb = file_size as f64 / (1024.0 * 1024.0);
-            println!(
-                "  ✓ {} already exists ({:.2} MB), skipping",
-                filename, size_mb
-            );
-            skipped += 1;
+    println!("Model: {}", QWEN3_TTS_MODEL.id);
+    println!("Target: {:?}\n", target_dir);
+
+    for &filename in QWEN3_TTS_MODEL.files {
+        let target_path = target_dir.join(filename);
+        if target_path.exists() {
+            println!("  ✓ Already exists: {}", filename);
         } else {
-            // Create parent directories if the filename contains path separators
-            if let Some(parent) = local_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            
-            println!("  ⬇️  Downloading {}...", filename);
-            let remote_file = repo.get(filename)?;
-            fs::copy(&remote_file, &local_path)?;
-            let file_size = fs::metadata(&local_path)?.len();
-            let size_mb = file_size as f64 / (1024.0 * 1024.0);
-            println!(
-                "  ✓ {} downloaded successfully ({:.2} MB)",
-                filename, size_mb
-            );
-            downloaded += 1;
+            download_model_file(&api, QWEN3_TTS_MODEL.id, filename, &target_dir)?;
         }
     }
 
-    Ok((downloaded, skipped))
+    println!("\n✅ Qwen3-TTS model downloaded successfully!");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    Ok(())
 }
 
-/// Download all required models
-pub fn download_all_models(models_dir: &Path) -> Result<()> {
-    println!("📦 Model Download Manager");
+/// Download MADLAD-400 translation model from HuggingFace Hub
+pub fn download_translation_model(models_dir: &Path) -> Result<()> {
+    println!("\n🔽 Downloading MADLAD-400 translation model...");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    println!("Models directory: {:?}\n", models_dir);
 
-    // Create models directory if it doesn't exist
-    fs::create_dir_all(models_dir)?;
+    let target_dir = TRANSLATION_MODEL.path(models_dir);
+    fs::create_dir_all(&target_dir)?;
 
-    // Use ApiBuilder to properly configure the cache
-    let api = ApiBuilder::new().with_progress(true).build()?;
+    let api = ApiBuilder::new()
+        .with_progress(true)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize HuggingFace API: {}", e))?;
 
-    // Download Finnish model
-    let (dl1, sk1) = download_model(&FINNISH_MODEL, models_dir, &api)?;
+    println!("Model: {}", TRANSLATION_MODEL.id);
+    println!("Target: {:?}\n", target_dir);
 
-    println!();
+    for &filename in TRANSLATION_MODEL.files {
+        let target_path = target_dir.join(filename);
+        if target_path.exists() {
+            println!("  ✓ Already exists: {}", filename);
+        } else {
+            download_model_file(&api, TRANSLATION_MODEL.id, filename, &target_dir)?;
+        }
+    }
 
-    // Download Portuguese model
-    let (dl2, sk2) = download_model(&PORTUGUESE_MODEL, models_dir, &api)?;
-
-    println!();
-
-    // Download Kokoro TTS model
-    let (dl3, sk3) = download_model(&KOKORO_TTS_MODEL, models_dir, &api)?;
-
-    println!();
-
-    // Download Kokoro voices
-    let (dl4, sk4) = download_model(&KOKORO_VOICES, models_dir, &api)?;
-
-    println!();
-
-    // Download Translation model
-    let (dl5, sk5) = download_model(&TRANSLATION_MODEL, models_dir, &api)?;
-
-    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("✅ All downloads complete!");
-    println!("   Downloaded: {}", dl1 + dl2 + dl3 + dl4 + dl5);
-    println!("   Skipped: {}", sk1 + sk2 + sk3 + sk4 + sk5);
-    println!(
-        "   Total: {}\n",
-        FINNISH_MODEL.files.len()
-            + PORTUGUESE_MODEL.files.len()
-            + KOKORO_TTS_MODEL.files.len()
-            + KOKORO_VOICES.files.len()
-            + TRANSLATION_MODEL.files.len()
-    );
+    println!("\n✅ MADLAD-400 translation model downloaded successfully!");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     Ok(())
 }

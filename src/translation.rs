@@ -108,9 +108,7 @@ impl Translator {
                 Tensor::new(&[last_token], &self.device)?.unsqueeze(0)?
             };
 
-            let logits = self
-                .model
-                .decode(&decoder_token_ids, &encoder_output)?;
+            let logits = self.model.decode(&decoder_token_ids, &encoder_output)?;
 
             // Debug: print logits shape
             if index == 0 {

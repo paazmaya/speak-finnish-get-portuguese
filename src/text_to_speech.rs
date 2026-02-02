@@ -1,173 +1,299 @@
-use anyhow::{Error as E, Result};
-use candle_core::{DType, Device};
+use anyhow::{Context, Result};
+use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_nn::VarBuilder;
 use hound::{WavSpec, WavWriter};
-use ndarray::Array2;
-use ort::session::{Session, builder::GraphOptimizationLevel};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-use crate::config;
+use crate::qwen3_speech_tokenizer::{Qwen3SpeechTokenizerDecoder, Qwen3TTSTokenizerConfig};
+use crate::qwen3_tts_model::{
+    sample_token, Qwen3TTSCodePredictor, Qwen3TTSConfig, Qwen3TTSTalkerModel,
+};
+
+const DTYPE: DType = DType::F32;
 
 pub struct PortugueseTTS {
-    session: Session,
+    talker_model: Qwen3TTSTalkerModel,
+    code_predictor: Qwen3TTSCodePredictor,
+    speech_tokenizer: Qwen3SpeechTokenizerDecoder,
     tokenizer: Tokenizer,
-    voice_embedding: Array2<f32>,
+    config: Qwen3TTSConfig,
+    device: Device,
     sample_rate: u32,
+    speaker: String,
+    language: String,
 }
 
 impl PortugueseTTS {
-    pub fn new(_device: Device, models_dir: &Path) -> Result<Self> {
-        println!("Loading Kokoro-82M TTS model from local directory...");
+    pub fn new(device: Device, models_dir: &Path) -> Result<Self> {
+        println!("Loading Qwen3-TTS model from local directory...");
 
-        let model_path = config::KOKORO_TTS_MODEL.path(models_dir);
-        let voices_path = config::KOKORO_VOICES.path(models_dir);
+        // Model path is directly in models_dir
+        let model_path = models_dir.join("Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice");
 
-        // Verify all required files exist
-        config::KOKORO_TTS_MODEL.verify_files(models_dir)?;
-        config::KOKORO_VOICES.verify_files(models_dir)?;
+        if !model_path.exists() {
+            anyhow::bail!(
+                "Qwen3-TTS model not found at {:?}. Please ensure the model is downloaded.",
+                model_path
+            );
+        }
 
-        // Use the full precision FP32 model (310MB, better quality)
-        let model_file = model_path.join("onnx/model.onnx");
-        let tokenizer_file = model_path.join("tokenizer_minimal.json");
-        let voice_file = voices_path.join("voices/pf_dora.pt");
+        println!("Loading from: {:?}", model_path);
 
-        println!("Loading ONNX model from: {:?}", model_file);
+        // Load configuration
+        let config_path = model_path.join("config.json");
+        let config_json =
+            std::fs::read_to_string(&config_path).context("Failed to read config.json")?;
+        let config: Qwen3TTSConfig =
+            serde_json::from_str(&config_json).context("Failed to parse config.json")?;
 
-        // Load tokenizer
-        let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(E::msg)?;
+        println!("Model config loaded:");
+        println!("  Layers: {}", config.talker_config.num_hidden_layers);
+        println!("  Hidden size: {}", config.talker_config.hidden_size);
+        println!("  Text hidden size: {}", config.talker_config.text_hidden_size);
+        println!("  Heads: {}", config.talker_config.num_attention_heads);
 
-        // Load ONNX model using ONNX Runtime
-        let mut builder = Session::builder()?;
-        builder = builder.with_optimization_level(GraphOptimizationLevel::Level3)?;
-        builder = builder.with_intra_threads(4)?;
-        let session = builder.commit_from_file(model_file)?;
-
-        println!("ONNX model loaded successfully");
-
-        // Load Brazilian Portuguese voice embedding from PyTorch file
-        println!("Loading Brazilian Portuguese voice: pf_dora");
+        // Load tokenizer - build from vocab and merges files
+        let vocab_path = model_path.join("vocab.json");
+        let merges_path = model_path.join("merges.txt");
         
-        let voice_embedding = match candle_core::pickle::PthTensors::new(&voice_file, None) {
-            Ok(voice_tensors) => {
-                let tensor_names: Vec<String> = voice_tensors.tensor_infos().keys().cloned().collect();
-                println!("Found {} tensors in voice file", tensor_names.len());
-                
-                if tensor_names.is_empty() {
-                    // Create a random voice embedding as fallback
-                    println!("WARNING: No tensors in PyTorch file, using random voice embedding");
-                    Array2::from_shape_fn((1, 256), |_| rand::random::<f32>())
-                } else {
-                    let name = &tensor_names[0];
-                    println!("  Loading tensor: '{}'", name);
-                    let tensor = voice_tensors.get(name)?
-                        .ok_or_else(|| E::msg(format!("Failed to load tensor '{}'", name)))?
-                        .to_device(&Device::Cpu)?;
-                    
-                    // Convert Candle tensor to ndarray
-                    let shape = tensor.shape();
-                    let data = tensor.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-                    
-                    if shape.dims().len() == 1 {
-                        Array2::from_shape_vec((1, shape.dims()[0]), data)?
-                    } else if shape.dims().len() == 2 {
-                        Array2::from_shape_vec((shape.dims()[0], shape.dims()[1]), data)?
-                    } else {
-                        anyhow::bail!("Unexpected voice embedding shape: {:?}", shape);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("WARNING: Failed to load PyTorch voice file: {}", e);
-                println!("  Using random voice embedding instead");
-                Array2::from_shape_fn((1, 256), |_| rand::random::<f32>())
-            }
+        // Build BPE tokenizer from vocab and merges
+        let tokenizer: Result<Tokenizer> = Tokenizer::from_file(&vocab_path)
+            .or_else(|_| {
+                // Try to create from components if direct load fails
+                use tokenizers::models::bpe::BPE;
+                let bpe = BPE::from_file(&vocab_path.to_string_lossy(), &merges_path.to_string_lossy())
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to build BPE tokenizer: {}", e))?;
+                Ok(Tokenizer::new(bpe))
+            })
+            .map_err(|e: tokenizers::Error| anyhow::anyhow!("Failed to load tokenizer: {}", e));
+        let tokenizer = tokenizer?;
+        println!("Text tokenizer loaded");
+
+        // Load main talker model weights
+        let safetensors_path = model_path.join("model.safetensors");
+        println!("Loading talker model weights...");
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[safetensors_path], DTYPE, &device)? };
+        // Weights are stored with "talker." prefix in the SafeTensors file
+        let vb = vb.pp("talker");
+
+        let talker_model = Qwen3TTSTalkerModel::load(vb.clone(), &config.talker_config)
+            .context("Failed to load talker model")?;
+        println!("✓ Talker model loaded");
+
+        println!("Loading code predictor model...");
+        let code_predictor = Qwen3TTSCodePredictor::load(
+            vb.pp("code_predictor"),
+            &config.talker_config.code_predictor_config,
+        )
+        .context("Failed to load code predictor model")?;
+        println!("✓ Code predictor loaded");
+
+        // Load speech tokenizer
+        let tokenizer_config_path = model_path.join("speech_tokenizer/config.json");
+        let tokenizer_config_json = std::fs::read_to_string(&tokenizer_config_path)
+            .context("Failed to read speech tokenizer config")?;
+        let tokenizer_config: Qwen3TTSTokenizerConfig =
+            serde_json::from_str(&tokenizer_config_json)
+                .context("Failed to parse tokenizer config")?;
+
+        println!("Loading speech tokenizer...");
+        let tokenizer_weights_path = model_path.join("speech_tokenizer/model.safetensors");
+        let tokenizer_vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[tokenizer_weights_path], DTYPE, &device)?
         };
-        
-        println!("Voice embedding shape: {:?}", voice_embedding.shape());
-        println!("Kokoro-82M TTS model loaded successfully");
+
+        let speech_tokenizer = Qwen3SpeechTokenizerDecoder::load(tokenizer_vb, &tokenizer_config)
+            .context("Failed to load speech tokenizer")?;
+        println!("✓ Speech tokenizer loaded");
+
+        println!("Qwen3-TTS model loaded successfully");
 
         Ok(Self {
-            session,
+            talker_model,
+            code_predictor,
+            speech_tokenizer,
             tokenizer,
-            voice_embedding,
-            sample_rate: 24000, // Kokoro-82M outputs 24kHz audio
+            config,
+            device,
+            sample_rate: 24000,          // Qwen3-TTS outputs 24kHz
+            speaker: "ryan".to_string(), // Default speaker (Portuguese-capable)
+            language: "portuguese".to_string(),
         })
+    }
+
+    pub fn set_speaker(&mut self, speaker: &str) {
+        self.speaker = speaker.to_lowercase();
     }
 
     pub fn synthesize(&mut self, text: &str) -> Result<Vec<f32>> {
         println!("Generating Portuguese audio for: {}", text);
+        println!("  Speaker: {}", self.speaker);
+        println!("  Language: {}", self.language);
 
-        // Tokenize the input text
-        let tokens = self
+        // Tokenize text with special format
+        let formatted_text = format!(
+            "<|im_start|>assistant\n{}<|im_end|>\n<|im_start|>assistant\n",
+            text
+        );
+        let encoding = self
             .tokenizer
-            .encode(text, true)
-            .map_err(E::msg)?
-            .get_ids()
-            .to_vec();
-        
-        let tokens_len = tokens.len();
-        println!("Text tokenized to {} tokens", tokens_len);
+            .encode(formatted_text, true)
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
-        // Convert tokens to i64 array for ONNX Runtime
-        let input_ids: Vec<i64> = tokens.iter().map(|&x| x as i64).collect();
-        let input_ids_array = Array2::from_shape_vec((1, tokens_len), input_ids)?;
+        let text_tokens = encoding.get_ids();
+        println!("Text tokenized to {} tokens", text_tokens.len());
 
-        // Prepare voice embedding
-        let voice_input = self.voice_embedding.clone();
+        // Get speaker and language IDs from config
+        let speaker_id = self
+            .config
+            .talker_config
+            .spk_id
+            .get(&self.speaker)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Unknown speaker: {}", self.speaker))?;
 
-        println!("Running ONNX inference...");
-        println!("  Input IDs shape: {:?}", input_ids_array.shape());
-        println!("  Voice embedding shape: {:?}", voice_input.shape());
+        let language_id = self
+            .config
+            .talker_config
+            .codec_language_id
+            .get(&self.language)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Unknown language: {}", self.language))?;
 
-        // Create ONNX Values - use tuple format (shape, vec) which is supported
-        let input_shape = input_ids_array.shape();
-        let voice_shape = voice_input.shape();
-        
-        let input_ids_value = ort::value::Value::from_array((
-            [input_shape[0], input_shape[1]],
-            input_ids_array.iter().copied().collect::<Vec<_>>()
-        ))?;
-        let voice_value = ort::value::Value::from_array((
-            [voice_shape[0], voice_shape[1]],
-            voice_input.iter().copied().collect::<Vec<_>>()
-        ))?;
-        
-        // Add speed parameter (1.0 = normal speed)
-        let speed_value = ort::value::Value::from_array(([1], vec![1.0f32]))?;
+        println!("Speaker ID: {}, Language ID: {}", speaker_id, language_id);
 
-        // Run ONNX model inference
-        let outputs = self.session.run(ort::inputs![
-            "input_ids" => &input_ids_value,
-            "style" => &voice_value,
-            "speed" => &speed_value,
-        ])?;
+        let codec_prefix: Vec<u32> = vec![
+            self.config.talker_config.codec_think_id,
+            self.config.talker_config.codec_think_bos_id,
+            language_id,
+            self.config.talker_config.codec_think_eos_id,
+            speaker_id,
+            self.config.talker_config.codec_pad_id,
+            self.config.talker_config.codec_bos_id,
+        ];
 
-        // Debug: Print available output names
-        println!("Available outputs:");
-        for (name, _value) in outputs.iter() {
-            println!("  Output: {}", name);
+        // Convert text tokens to tensor
+        let text_ids = Tensor::from_vec(
+            text_tokens.iter().map(|&x| x as u32).collect(),
+            (1, text_tokens.len()),
+            &self.device,
+        )?;
+
+        println!("Running talker model inference...");
+
+        println!("Generating codec tokens...");
+
+        let max_new_tokens = 2048;
+        let temperature = 0.9;
+        let top_k = 50;
+        let top_p = 1.0;
+
+        let mut generated_tokens = Vec::new();
+
+        for step in 0..max_new_tokens {
+            let mut codec_ids_vec = Vec::with_capacity(codec_prefix.len() + generated_tokens.len());
+            codec_ids_vec.extend_from_slice(&codec_prefix);
+            codec_ids_vec.extend_from_slice(&generated_tokens);
+
+            let codec_ids = Tensor::from_vec(
+                codec_ids_vec.iter().copied().collect::<Vec<u32>>(),
+                (1, codec_ids_vec.len()),
+                &self.device,
+            )?;
+
+            let total_len = text_tokens.len() + codec_ids_vec.len();
+            let position_ids = Tensor::arange(0u32, total_len as u32, &self.device)?
+                .reshape((1, total_len))?;
+
+            let logits = self
+                .talker_model
+                .forward(&text_ids, &codec_ids, &position_ids)?;
+
+            let last_logits = logits
+                .i((0, total_len - 1, ..))?;
+
+            let next_token = sample_token(&last_logits, temperature, top_k, top_p)?;
+
+            if next_token == self.config.talker_config.codec_eos_token_id {
+                println!("Reached EOS token at step {}", step);
+                break;
+            }
+
+            generated_tokens.push(next_token);
+
+            if step % 100 == 0 {
+                println!("  Generated {} tokens", step + 1);
+            }
         }
 
-        // Extract audio output - use the first (and likely only) output
-        let (output_name, output_value) = outputs.iter().next()
-            .ok_or_else(|| E::msg("No outputs from ONNX model"))?;
+        println!("Generated {} codec tokens", generated_tokens.len());
+
+        if generated_tokens.is_empty() {
+            anyhow::bail!("No codec tokens were generated by the talker model");
+        }
+
+        // Use actual number of quantizers (may be less than config for 12Hz variant)
+        let num_quantizers = self.code_predictor.num_quantizers();
+        let codebook_vocab = self.config.talker_config.code_predictor_config.vocab_size as u32;
+        let seq_len = generated_tokens.len();
+
+        let mut predictor_input = vec![0u32; num_quantizers * seq_len];
+        for (i, &token) in generated_tokens.iter().enumerate() {
+            predictor_input[i] = clamp_codebook_token(token, codebook_vocab);
+        }
+
+        let predictor_ids = Tensor::from_vec(
+            predictor_input,
+            (num_quantizers, seq_len),
+            &self.device,
+        )?;
+
+        let predictor_position_ids = Tensor::arange(0u32, seq_len as u32, &self.device)?
+            .reshape((1, seq_len))?;
+
+        println!("Running code predictor...");
+        let logits_by_group = self
+            .code_predictor
+            .forward(&predictor_ids, &predictor_position_ids)?;
+
+        // Use actual number of logits returned (may be less than config for 12Hz variant)
+        let actual_num_quantizers = logits_by_group.len();
         
-        println!("Using output: {}", output_name);
-        let audio_tensor = output_value.try_extract_tensor::<f32>()?;
-        let audio_data = audio_tensor.1;
-        
-        println!("Audio output shape: {:?}", audio_tensor.0);
-        
-        // Convert to Vec
-        let samples: Vec<f32> = audio_data.iter().copied().collect();
+        let mut codec_tokens_data = vec![0u32; actual_num_quantizers * seq_len];
+        for (i, &token) in generated_tokens.iter().enumerate() {
+            codec_tokens_data[i] = clamp_codebook_token(token, codebook_vocab);
+        }
+
+        for group_idx in 1..actual_num_quantizers {
+            let logits = &logits_by_group[group_idx];
+            for pos in 0..seq_len {
+                let pos_logits = logits.i((0, pos, ..))?;
+                let token = sample_token(&pos_logits, temperature, top_k, top_p)?;
+                codec_tokens_data[group_idx * seq_len + pos] = token;
+            }
+        }
+
+        let codec_tokens = Tensor::from_vec(
+            codec_tokens_data,
+            (actual_num_quantizers, generated_tokens.len()),
+            &self.device,
+        )?;
+
+        println!("Decoding codec tokens to audio...");
+
+        // Decode codec tokens to waveform using speech tokenizer
+        let waveform = self.speech_tokenizer.decode(&codec_tokens)?;
 
         println!(
             "Generated {:.2} seconds of Portuguese speech ({} samples)",
-            samples.len() as f32 / self.sample_rate as f32,
-            samples.len()
+            waveform.len() as f32 / self.sample_rate as f32,
+            waveform.len()
         );
 
-        Ok(samples)
+        Ok(waveform)
     }
 
     pub fn save_wav(&self, samples: &[f32], path: impl AsRef<Path>) -> Result<()> {
@@ -187,5 +313,13 @@ impl PortugueseTTS {
         }
         writer.finalize()?;
         Ok(())
+    }
+}
+
+fn clamp_codebook_token(token: u32, vocab_size: u32) -> u32 {
+    if token >= vocab_size {
+        0
+    } else {
+        token
     }
 }
