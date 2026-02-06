@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 /// Model configuration constants
 pub const QWEN3_TTS_MODEL_ID: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 pub const TRANSLATION_MODEL_ID: &str = "google/madlad400-3b-mt";
+pub const FINNISH_WHISPER_MODEL_ID: &str = "Finnish-NLP/whisper-tiny-finnish";
 
 /// Model configuration describing files needed for the model
 pub struct ModelConfig {
@@ -69,6 +70,12 @@ pub const QWEN3_TTS_MODEL: ModelConfig = ModelConfig {
 pub const TRANSLATION_MODEL: ModelConfig = ModelConfig {
     id: TRANSLATION_MODEL_ID,
     files: &["config.json", "model-q2k.gguf", "tokenizer.json"],
+};
+
+/// Configuration for Finnish Whisper model (Finnish speech-to-text)
+pub const FINNISH_MODEL: ModelConfig = ModelConfig {
+    id: FINNISH_WHISPER_MODEL_ID,
+    files: &["config.json", "model.safetensors", "tokenizer.json"],
 };
 
 /// Download a single model file from HuggingFace Hub

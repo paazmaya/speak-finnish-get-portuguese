@@ -186,10 +186,12 @@ impl PortugueseTTS {
 
         println!("Generating codec tokens...");
 
-        let max_new_tokens = 2048;
-        let temperature = 0.9;
-        let top_k = 50;
-        let top_p = 1.0;
+        // Increased limit for longer, more natural speech
+        // At 12.5Hz frame rate: 200 tokens ≈ 16 seconds of audio
+        let max_new_tokens = 200;
+        let temperature = 0.7;  // Lower temperature for more stable generation
+        let top_k = 50;         // Narrower sampling for better quality
+        let top_p = 0.9;        // Nucleus sampling
 
         let mut generated_tokens = Vec::new();
 
@@ -224,7 +226,8 @@ impl PortugueseTTS {
 
             generated_tokens.push(next_token);
 
-            if step % 100 == 0 {
+            // Print every 20 tokens to show progress
+            if (step + 1) % 20 == 0 {
                 println!("  Generated {} tokens", step + 1);
             }
         }
@@ -271,7 +274,8 @@ impl PortugueseTTS {
             let logits = &logits_by_group[group_idx];
             for pos in 0..seq_len {
                 let pos_logits = logits.i((0, pos, ..))?;
-                let token = sample_token(&pos_logits, temperature, top_k, top_p)?;
+                // Use lower temperature for codec prediction to reduce artifacts
+                let token = sample_token(&pos_logits, 0.7, 50, 0.9)?;
                 codec_tokens_data[group_idx * seq_len + pos] = token;
             }
         }

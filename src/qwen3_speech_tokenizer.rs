@@ -59,7 +59,7 @@ impl CausalConv1d {
             padding: 0,
             cudnn_fwd_algo: None,
         };
-        let conv = conv1d(in_channels, out_channels, kernel_size, config, vb)?;
+        let conv = conv1d(in_channels, out_channels, kernel_size, config, vb.pp("conv"))?;
         let kernel_size_dilated = (kernel_size - 1) * dilation + 1;
         let padding = kernel_size_dilated - stride;
         
@@ -119,7 +119,7 @@ impl CausalTransposeConv1d {
             padding: 0,
             ..Default::default()
         };
-        let conv = conv_transpose1d(in_channels, out_channels, kernel_size, config, vb)?;
+        let conv = conv_transpose1d(in_channels, out_channels, kernel_size, config, vb.pp("conv"))?;
         let pad = kernel_size - stride;
         let left_pad = (pad as f32 / 2.0).ceil() as usize;
         let right_pad = pad - left_pad;
@@ -222,21 +222,21 @@ impl DecoderBlock {
         upsample_rate: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let initial_act = SnakeBeta::new(in_dim, vb.pp("0"))?;
+        let initial_act = SnakeBeta::new(in_dim, vb.pp("block.0"))?;
         let upsample = CausalTransposeConv1d::new(
             in_dim,
             out_dim,
             2 * upsample_rate,
             upsample_rate,
-            vb.pp("1"),
+            vb.pp("block.1"),
         )?;
         
         let mut residual_units = Vec::new();
-        for (i, dilation) in [1, 3, 9].iter().enumerate() {
+        for i in 2..5 {  // blocks 2, 3, 4
             residual_units.push(DecoderResidualUnit::new(
                 out_dim,
-                *dilation,
-                vb.pp(&(i + 2).to_string()),
+                1,  // dilation = 1 for all
+                vb.pp(&format!("block.{}", i)),
             )?);
         }
         
@@ -316,17 +316,34 @@ impl RmsNorm {
 pub struct Qwen3SpeechTokenizerDecoder {
     // RVQ codebook embeddings (16 layers)
     codebook_embeddings: Vec<Tensor>,
+    // RVQ output projection (256->512)
+    rvq_output_proj: Option<Conv1d>,
+    // Pre-conv projects from 512 to 1024
+    pre_conv: Option<Conv1d>,
     // Pre-transformer processes codebook embeddings
     pre_transformer: Option<PreTransformer>,
-    // Final projection to waveform
+    // Initial decoder conv (1024->1536)
+    initial_conv: Option<Conv1d>,
+    // Decoder blocks for upsampling
+    decoder_blocks: Option<Vec<DecoderBlock>>,
+    // Final activation and conv
+    final_act: Option<SnakeBeta>,
+    final_conv: Option<Conv1d>,
+    // Upsampling blocks with ConvNeXt
+    upsample_blocks: Option<Vec<(Conv1d, ConvNeXtBlock)>>,
+    // Final projection to waveform (unused in this architecture)
     output_proj: Option<Linear>,
     config: DecoderConfig,
+    output_sample_rate: usize,
+    decode_upsample_rate: usize,
 }
 
 // Pre-transformer with 8 layers
 struct PreTransformer {
     input_proj: Linear,
     layers: Vec<TransformerLayer>,
+    norm: RmsNorm,
+    output_proj: Linear,
 }
 
 struct TransformerLayer {
@@ -442,20 +459,32 @@ impl PreTransformer {
             layers.push(TransformerLayer::new(config, vb_layers.pp(&i.to_string()))?);
         }
         
+        let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("norm"))?;
+        let output_proj = linear(config.hidden_size, config.latent_dim, vb.pp("output_proj"))?;
+        
         Ok(Self {
             input_proj,
             layers,
+            norm,
+            output_proj,
         })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut hidden_states = self.input_proj.forward(x)?;
+        // x shape: [batch, latent_dim, seq] -> transpose to [batch, seq, latent_dim]
+        let x = x.transpose(1, 2)?;
+        let mut hidden_states = self.input_proj.forward(&x)?;
         
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states)?;
         }
         
-        Ok(hidden_states)
+        // Apply final norm and output projection
+        hidden_states = self.norm.forward(&hidden_states)?;
+        hidden_states = self.output_proj.forward(&hidden_states)?;
+        
+        // Transpose back: [batch, seq, latent_dim] -> [batch, latent_dim, seq]
+        Ok(hidden_states.transpose(1, 2)?)
     }
 }
 
@@ -464,9 +493,18 @@ impl Qwen3SpeechTokenizerDecoder {
     pub fn placeholder(config: &Qwen3TTSTokenizerConfig) -> Result<Self> {
         Ok(Self {
             codebook_embeddings: Vec::new(),
+            rvq_output_proj: None,
+            pre_conv: None,
             pre_transformer: None,
+            initial_conv: None,
+            decoder_blocks: None,
+            final_act: None,
+            final_conv: None,
+            upsample_blocks: None,
             output_proj: None,
             config: config.decoder_config.clone(),
+            output_sample_rate: config.output_sample_rate,
+            decode_upsample_rate: config.decode_upsample_rate,
         })
     }
 
@@ -496,6 +534,47 @@ impl Qwen3SpeechTokenizerDecoder {
         }
         println!("✓ Loaded {} RVQ codebooks", codebook_embeddings.len());
 
+        // Load RVQ output projection (256->512)
+        println!("Loading RVQ output projection...");
+        let rvq_output_proj = {
+            let proj_vb = vb.pp("decoder.quantizer.rvq_rest.output_proj");
+            match proj_vb.get((512, 256, 1), "weight") {
+                Ok(weight) => {
+                    // Create Conv1d without bias (bias = None)
+                    let config = Conv1dConfig::default();
+                    let conv = Conv1d::new(weight, None, config);
+                    println!("✓ RVQ output projection loaded (256 -> 512, no bias)");
+                    Some(conv)
+                }
+                Err(e) => {
+                    println!("⚠ RVQ output projection weight not found: {}, will skip", e);
+                    None
+                }
+            }
+        };
+
+        // Load pre-conv (Conv1d 512->1024, kernel=3)
+        println!("Attempting to load pre-conv layer...");
+        let pre_conv = match conv1d(
+            512,
+            1024,
+            3,
+            Conv1dConfig {
+                padding: 1,
+                ..Default::default()
+            },
+            vb.pp("decoder.pre_conv.conv")
+        ) {
+            Ok(conv) => {
+                println!("✓ Pre-conv loaded (512 -> 1024)");
+                Some(conv)
+            }
+            Err(_) => {
+                println!("⚠ Pre-conv not found, will skip");
+                None
+            }
+        };
+
         // Load pre-transformer
         println!("Loading pre-transformer...");
         let pre_transformer = PreTransformer::new(
@@ -504,119 +583,221 @@ impl Qwen3SpeechTokenizerDecoder {
         )?;
         println!("✓ Pre-transformer loaded");
 
-        // Load complete decoder pipeline
-        println!("Loading decoder conv blocks...");
+        // Load decoder blocks
+        println!("Loading decoder blocks...");
+        let dims = vec![1536, 768, 384, 192, 96]; // From config analysis
+        let upsample_rates = vec![8, 5, 4, 3]; // From config
+        let mut decoder_blocks = Vec::new();
         
-        // Note: Full decoder implementation would load:
-        // - pre_conv (codebook_dim -> latent_dim)
-        // - upsample blocks (upsampling_ratios)  
-        // - decoder blocks (upsample_rates)
-        // - final output conv
+        // Initial conv: decoder.decoder.0.conv (1024->1536, kernel=7)
+        let initial_conv = conv1d(
+            1024, 1536, 7,
+            Conv1dConfig {
+                padding: 3,
+                ..Default::default()
+            },
+            vb.pp("decoder.decoder.0.conv")
+        );
         
-        // For now, simplified implementation
-        let output_proj = None;
+        if initial_conv.is_ok() {
+            println!("  ✓ Initial conv loaded (1024 -> 1536)");
+        }
+        
+        // Blocks 1-4: Upsampling with residual units
+        for i in 0..4 {
+            match DecoderBlock::new(
+                dims[i],
+                dims[i + 1],
+                upsample_rates[i],
+                vb.pp(&format!("decoder.decoder.{}", i + 1))
+            ) {
+                Ok(block) => {
+                    println!("  ✓ Decoder block {} loaded ({} -> {})", i + 1, dims[i], dims[i + 1]);
+                    decoder_blocks.push(block);
+                }
+                Err(e) => {
+                    println!("  ⚠ Decoder block {} failed: {}", i + 1, e);
+                    return Err(e);
+                }
+            }
+        }
+        
+        // Final activation: decoder.decoder.5
+        let final_act = SnakeBeta::new(96, vb.pp("decoder.decoder.5")).ok();
+        
+        // Final conv: decoder.decoder.6.conv (96 -> 1, kernel=7)
+        let final_conv = conv1d(
+            96, 1, 7,
+            Conv1dConfig {
+                padding: 3,
+                ..Default::default()
+            },
+            vb.pp("decoder.decoder.6.conv")
+        ).ok();
+        
+        // Load upsample blocks (decoder.upsample.0 and decoder.upsample.1)
+        println!("Loading upsample blocks...");
+        let mut upsample_blocks = Vec::new();
+        for i in 0..2 {
+            let upsample_conv = conv1d(
+                1024, 1024, 2,
+                Conv1dConfig {
+                    stride: 2,
+                    ..Default::default()
+                },
+                vb.pp(&format!("decoder.upsample.{}.0", i))
+            ).ok();
+            let convnext = ConvNeXtBlock::new(
+                1024,
+                vb.pp(&format!("decoder.upsample.{}.1", i))
+            ).ok();
+            
+            if let (Some(conv), Some(block)) = (upsample_conv, convnext) {
+                println!("  ✓ Upsample block {} loaded", i);
+                upsample_blocks.push((conv, block));
+            }
+        }
 
         Ok(Self {
             codebook_embeddings,
+            rvq_output_proj,
+            pre_conv,
             pre_transformer: Some(pre_transformer),
-            output_proj,
+            initial_conv: initial_conv.ok(),
+            decoder_blocks: Some(decoder_blocks),
+            final_act,
+            final_conv,
+            upsample_blocks: if upsample_blocks.is_empty() { None } else { Some(upsample_blocks) },
+            output_proj: None,
             config: decoder_config.clone(),
+            output_sample_rate: config.output_sample_rate,
+            decode_upsample_rate: config.decode_upsample_rate,
         })
     }
 
     pub fn decode(&self, codec_tokens: &Tensor) -> Result<Vec<f32>> {
-        // Placeholder implementation - return silence if no weights loaded
-        if self.codebook_embeddings.is_empty() {
-            println!("⚠ Using placeholder audio decoder - returning silence");
-            let seq_len = codec_tokens.dim(D::Minus1)?;
-            let num_samples = seq_len * 1920;
-            return Ok(vec![0.0; num_samples]);
-        }
-
-        println!("Decoding with RVQ codebooks...");
+        use std::time::Instant;
+        let decode_start = Instant::now();
+        println!("Decoding with REAL decoder architecture...");
         
-        // codec_tokens shape: (batch, num_quantizers, seq_len)
+        // Get dimensions
         let dims = codec_tokens.dims();
-        let (batch, num_quantizers, seq_len) = if dims.len() == 3 {
-            (dims[0], dims[1], dims[2])
-        } else if dims.len() == 2 {
-            // Add batch dimension
-            let tokens = codec_tokens.unsqueeze(0)?;
-            return self.decode(&tokens);
+        let (num_quantizers, seq_len) = if dims.len() == 2 {
+            (dims[0], dims[1])
+        } else if dims.len() == 3 {
+            (dims[1], dims[2])
         } else {
-            anyhow::bail!("Expected codec_tokens shape (batch, num_quantizers, seq_len), got {:?}", dims);
+            anyhow::bail!("Expected codec_tokens shape (num_quantizers, seq_len) or (batch, num_quantizers, seq_len), got {:?}", dims);
         };
 
-        if num_quantizers != self.config.num_quantizers {
-            println!("⚠ Warning: Expected {} quantizers, got {}", self.config.num_quantizers, num_quantizers);
+        println!("  Processing {} tokens with {} quantizers", seq_len, num_quantizers);
+
+        // Decode RVQ: Sum embeddings from all quantizers
+        let codebook_dim = self.codebook_embeddings[0].dim(1)?;
+        let num_codebooks = num_quantizers.min(self.codebook_embeddings.len());
+        
+        let device = &self.codebook_embeddings[0].device();
+        
+        // Collect embeddings from each quantizer layer and sum them (residual)
+        let mut z: Option<Tensor> = None;
+        for q in 0..num_codebooks {
+            // Extract codes for this quantizer: shape [seq_len]
+            let codes = if dims.len() == 2 {
+                codec_tokens.i(q)?
+            } else {
+                codec_tokens.i((0, q))?
+            };
+            
+            // Look up embeddings: [seq_len, codebook_dim]
+            let emb = self.codebook_embeddings[q].embedding(&codes)?;
+            
+            // Accumulate (residual quantization)
+            z = Some(match z {
+                None => emb,
+                Some(prev) => (prev + emb)?,
+            });
         }
-
-        // Decode through RVQ (sum embeddings from all quantizer layers)
-        // First quantizer (semantic)
-        let first_codes = codec_tokens.i((.., 0, ..))?;
-        let mut quantized = self.codebook_embeddings[0].embedding(&first_codes)?;
         
-        // Remaining quantizers (acoustic) - sum their contributions
-        for i in 1..num_quantizers.min(self.codebook_embeddings.len()) {
-            let codes = codec_tokens.i((.., i, ..))?;
-            let emb = self.codebook_embeddings[i].embedding(&codes)?;
-            quantized = (quantized + emb)?;
+        let mut z = z.ok_or_else(|| anyhow::anyhow!("No codebooks processed"))?;
+        println!("  ✓ RVQ decoded {} frames, shape {:?}", seq_len, z.dims());
+        
+        // Reshape for Conv1d: [batch=1, channels=codebook_dim, seq_len]
+        z = z.t()?.unsqueeze(0)?;
+        println!("  After transpose: {:?}", z.dims());
+        
+        // Apply RVQ output projection: 256 -> 512
+        if let Some(ref rvq_proj) = self.rvq_output_proj {
+            z = rvq_proj.forward(&z)?;
+            println!("  ✓ RVQ output projection applied: {:?}", z.dims());
         }
         
-        println!("  RVQ decoded shape: {:?}", quantized.dims());
-
-        // quantized shape: (batch, seq_len, codebook_dim=256)
-        // Need to project to latent_dim (1024) and process through transformer
-        
-        // For simplified implementation: tile codebook_dim to latent_dim
-        let latent_dim = self.config.latent_dim;
-        let codebook_dim = quantized.dim(D::Minus1)?;
-        let repeat_factor = latent_dim / codebook_dim;
-        
-        let mut parts = vec![quantized.clone()];
-        for _ in 1..repeat_factor {
-            parts.push(quantized.clone());
+        // Apply pre-conv: 512 -> 1024
+        if let Some(ref pre_conv) = self.pre_conv {
+            z = pre_conv.forward(&z)?;
+            println!("  ✓ Pre-conv applied: {:?}", z.dims());
         }
-        let projected = Tensor::cat(&parts.iter().collect::<Vec<_>>(), D::Minus1)?;
         
-        println!("  Projected to latent_dim: {:?}", projected.dims());
-
-        // FAST PATH: Skip transformer for speed, use simplified decoder
-        // Real implementation would process through:
-        // - pre_transformer (8 layers - SLOW)
-        // - pre_conv: latent_dim conv
-        // - upsample blocks with ConvNeXt
-        // - decoder blocks with transposed conv + residual units
-        // - final conv to 1 channel
+        // Run through pre-transformer (8 layers)
+        // Pre-transformer: [1, 1024, seq] -> [1, 1024, seq]
+        if let Some(ref transformer) = self.pre_transformer {
+            z = transformer.forward(&z)?;
+            println!("  ✓ Pre-transformer applied: {:?}", z.dims());
+        }
         
-        println!("⚠ Using fast simplified decoder (skipping transformer for speed)");
+        // Apply initial decoder conv (1024->1536)
+        if let Some(ref initial_conv) = self.initial_conv {
+            z = initial_conv.forward(&z)?;
+            println!("  ✓ Initial decoder conv: {:?}", z.dims());
+        }
         
-        // Use mean across latent dimension as audio feature
-        let hidden_flat = projected.mean_keepdim(D::Minus1)?.flatten_all()?;
-        let hidden_vec = hidden_flat.to_vec1::<f32>()?;
+        // Apply decoder blocks (8x -> 40x -> 160x -> 480x total upsampling)
+        if let Some(ref decoder_blocks) = self.decoder_blocks {
+            for (i, block) in decoder_blocks.iter().enumerate() {
+                z = block.forward(&z)?;
+                println!("  ✓ Decoder block {}: {:?}", i + 1, z.dims());
+            }
+        }
         
-        // Each codec frame should produce ~1920 audio samples (24kHz / 12.5Hz)
-        let samples_per_frame = 1920;
-        let target_len = seq_len * samples_per_frame;
-        let audio = interpolate_audio(&hidden_vec, target_len);
-
+        // Apply final activation
+        if let Some(ref final_act) = self.final_act {
+            z = final_act.forward(&z)?;
+            println!("  ✓ Final activation: {:?}", z.dims());
+        }
+        
+        // Apply final conv (96 -> 1 channel)
+        if let Some(ref final_conv) = self.final_conv {
+            z = final_conv.forward(&z)?;
+            println!("  ✓ Final conv: {:?}", z.dims());
+        }
+        
+        // Extract waveform: [1, 1, samples] -> [samples]
+        let audio = z.squeeze(0)?.squeeze(0)?.to_vec1::<f32>()?;
+        
         // Normalize to [-1, 1]
         let max_val = audio.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        let audio = if max_val > 1.0 {
-            audio.iter().map(|x| x / max_val).collect()
-        } else {
-            audio
-        };
+        let mut audio_normalized = audio.clone();
+        if max_val > 1e-6 {
+            let scale = 0.95 / max_val;
+            for sample in &mut audio_normalized {
+                *sample *= scale;
+            }
+        }
 
-        println!("✓ Decoded to {} samples", audio.len());
+        println!("✓ Decoded to {} samples ({:.2}s at {}Hz) in {:.2}s wallclock", 
+                 audio_normalized.len(), 
+                 audio_normalized.len() as f32 / self.output_sample_rate as f32,
+                 self.output_sample_rate,
+                 decode_start.elapsed().as_secs_f32());
 
-        Ok(audio)
+        Ok(audio_normalized)
     }
 
     pub fn sample_rate(&self) -> usize {
-        24000
+        self.output_sample_rate
     }
 }
+
+#[allow(dead_code)]
 
 // Simple linear interpolation for audio resampling
 fn interpolate_audio(input: &[f32], target_len: usize) -> Vec<f32> {
