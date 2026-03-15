@@ -18,7 +18,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       # https://github.com/actions-rust-lang/setup-rust-toolchain
       - name: Set up Rust
