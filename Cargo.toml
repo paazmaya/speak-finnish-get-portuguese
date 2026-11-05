@@ -2,6 +2,14 @@
 name = "speech-fin-to-por"
 version = "0.1.0"
 edition = "2021"
+description = "Finnish to Portuguese speech translation pipeline using Candle ML"
+license = "MIT"
+authors = ["Juga Paazmaya <paazmaya@yahoo.com>"]
+homepage = "https://github.com/paazmaya/speak-finnish-get-portuguese"
+repository = "https://github.com/paazmaya/speak-finnish-get-portuguese"
+keywords = ["speech", "translation", "whisper", "tts", "candle"]
+categories = ["command-line-utilities", "multimedia::audio"]
+publish = false
 
 [dependencies]
 # Candle framework
