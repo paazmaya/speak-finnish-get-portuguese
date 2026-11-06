@@ -4,6 +4,7 @@ use candle_nn::{embedding, linear, linear_no_bias, ops::softmax, Embedding, Line
 use serde::Deserialize;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 const DTYPE: DType = DType::F32;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -11,6 +12,7 @@ pub struct Qwen3TTSConfig {
     pub talker_config: TalkerConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TalkerConfig {
     pub vocab_size: usize,
@@ -39,6 +41,7 @@ pub struct TalkerConfig {
     pub codec_pad_id: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeScaling {
     pub mrope_section: Vec<usize>,
@@ -84,6 +87,7 @@ impl RmsNorm {
 struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    #[allow(dead_code)]
     mrope_section: Option<Vec<usize>>,
 }
 
@@ -583,6 +587,7 @@ pub struct Qwen3TTSTalkerModel {
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     codec_head: Linear,
+    #[allow(dead_code)]
     config: TalkerConfig,
 }
 
@@ -616,7 +621,7 @@ impl Qwen3TTSTalkerModel {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let vb_layers = vb.pp("model.layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(DecoderLayer::new(config, vb_layers.pp(&i.to_string()))?);
+            layers.push(DecoderLayer::new(config, vb_layers.pp(i.to_string()))?);
         }
 
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
@@ -660,6 +665,7 @@ impl Qwen3TTSTalkerModel {
         Ok(self.codec_head.forward(&hidden_states)?)
     }
 
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub fn create_codec_prefix(
         &self,
         device: &Device,
@@ -696,7 +702,7 @@ impl Qwen3TTSCodePredictor {
             match embedding(
                 config.vocab_size,
                 config.hidden_size,
-                vb_emb.pp(&i.to_string()),
+                vb_emb.pp(i.to_string()),
             ) {
                 Ok(emb) => codec_embeddings.push(emb),
                 Err(_) => {
@@ -709,7 +715,7 @@ impl Qwen3TTSCodePredictor {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let vb_layers = vb.pp("model.layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(CodePredictorLayer::new(config, vb_layers.pp(&i.to_string()))?);
+            layers.push(CodePredictorLayer::new(config, vb_layers.pp(i.to_string()))?);
         }
 
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
@@ -721,7 +727,7 @@ impl Qwen3TTSCodePredictor {
             lm_heads.push(linear_no_bias(
                 config.hidden_size,
                 config.vocab_size,
-                vb_lm.pp(&i.to_string()),
+                vb_lm.pp(i.to_string()),
             )?);
         }
 

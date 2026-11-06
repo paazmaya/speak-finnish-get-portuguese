@@ -124,6 +124,7 @@ impl PortugueseTTS {
         })
     }
 
+    #[allow(dead_code)]
     pub fn set_speaker(&mut self, speaker: &str) {
         self.speaker = speaker.to_lowercase();
     }
@@ -177,7 +178,7 @@ impl PortugueseTTS {
 
         // Convert text tokens to tensor
         let text_ids = Tensor::from_vec(
-            text_tokens.iter().map(|&x| x as u32).collect(),
+            text_tokens.to_vec(),
             (1, text_tokens.len()),
             &self.device,
         )?;
@@ -201,7 +202,7 @@ impl PortugueseTTS {
             codec_ids_vec.extend_from_slice(&generated_tokens);
 
             let codec_ids = Tensor::from_vec(
-                codec_ids_vec.iter().copied().collect::<Vec<u32>>(),
+                codec_ids_vec.to_vec(),
                 (1, codec_ids_vec.len()),
                 &self.device,
             )?;
@@ -311,7 +312,7 @@ impl PortugueseTTS {
         let mut writer = WavWriter::create(path, spec)?;
         for &sample in samples {
             // Clamp to [-1.0, 1.0] range before converting
-            let clamped = sample.max(-1.0).min(1.0);
+            let clamped = sample.clamp(-1.0, 1.0);
             let amplitude = (clamped * i16::MAX as f32) as i16;
             writer.write_sample(amplitude)?;
         }

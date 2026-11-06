@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Audio capture and processing for microphone input and WAV files
+#[allow(dead_code)]
 pub struct AudioCapture;
 
+#[allow(dead_code)]
 impl AudioCapture {
     pub fn new() -> Self {
         Self
@@ -51,7 +53,7 @@ impl AudioCapture {
         // Convert to mono if stereo
         if spec.channels == 2 {
             samples = samples
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                 .collect();
         }
@@ -174,7 +176,7 @@ impl AudioCapture {
         // Convert to mono if stereo
         if channels == 2 {
             recorded_samples = recorded_samples
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                 .collect();
             println!("Converted to mono: {} samples", recorded_samples.len());
@@ -309,7 +311,7 @@ impl AudioCapture {
                                 // Convert to mono if stereo
                                 if channels == 2 {
                                     current_samples = current_samples
-                                        .chunks_exact(2)
+                                        .as_chunks::<2>().0.iter()
                                         .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                                         .collect();
                                 }

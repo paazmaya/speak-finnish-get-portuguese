@@ -3,6 +3,7 @@ use candle_core::{DType, IndexOp, Module, Tensor, D};
 use candle_nn::{conv1d, conv_transpose1d, linear, linear_no_bias, ops::softmax, Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Linear, VarBuilder};
 use serde::Deserialize;
 
+#[allow(dead_code)]
 const DTYPE: DType = DType::F32;
 
 // SnakeBeta activation function: x + (1/beta) * sin^2(alpha * x)
@@ -76,12 +77,12 @@ impl CausalConv1d {
         
         let padded = if self.padding > 0 || extra_padding > 0 {
             let mut data = x.to_vec3::<f32>()?;
-            for b in 0..batch {
-                for c in 0..channels {
+            for channel_rows in data.iter_mut() {
+                for channel in channel_rows.iter_mut() {
                     let mut row = vec![0.0; self.padding];
-                    row.extend_from_slice(&data[b][c]);
+                    row.extend_from_slice(channel);
                     row.resize(row.len() + extra_padding, 0.0);
-                    data[b][c] = row;
+                    *channel = row;
                 }
             }
             let new_len = length + self.padding + extra_padding;
@@ -158,6 +159,7 @@ impl ConvNeXtBlock {
         Ok(Self { dwconv, norm, pwconv1, pwconv2, gamma })
     }
 
+    #[allow(dead_code)]
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let input = x.clone();
         let mut hidden = self.dwconv.forward(x)?;
@@ -236,7 +238,7 @@ impl DecoderBlock {
             residual_units.push(DecoderResidualUnit::new(
                 out_dim,
                 1,  // dilation = 1 for all
-                vb.pp(&format!("block.{}", i)),
+                vb.pp(format!("block.{}", i)),
             )?);
         }
         
@@ -273,6 +275,7 @@ pub struct EncoderConfig {
     pub codebook_size: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecoderConfig {
     pub hidden_size: usize,
@@ -330,11 +333,15 @@ pub struct Qwen3SpeechTokenizerDecoder {
     final_act: Option<SnakeBeta>,
     final_conv: Option<Conv1d>,
     // Upsampling blocks with ConvNeXt
+    #[allow(dead_code)]
     upsample_blocks: Option<Vec<(Conv1d, ConvNeXtBlock)>>,
     // Final projection to waveform (unused in this architecture)
+    #[allow(dead_code)]
     output_proj: Option<Linear>,
+    #[allow(dead_code)]
     config: DecoderConfig,
     output_sample_rate: usize,
+    #[allow(dead_code)]
     decode_upsample_rate: usize,
 }
 
@@ -456,7 +463,7 @@ impl PreTransformer {
         let mut layers = Vec::new();
         let vb_layers = vb.pp("layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(TransformerLayer::new(config, vb_layers.pp(&i.to_string()))?);
+            layers.push(TransformerLayer::new(config, vb_layers.pp(i.to_string()))?);
         }
         
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("norm"))?;
@@ -490,6 +497,7 @@ impl PreTransformer {
 
 impl Qwen3SpeechTokenizerDecoder {
     /// Create a placeholder decoder without loading weights
+    #[allow(dead_code)]
     pub fn placeholder(config: &Qwen3TTSTokenizerConfig) -> Result<Self> {
         Ok(Self {
             codebook_embeddings: Vec::new(),
@@ -585,8 +593,8 @@ impl Qwen3SpeechTokenizerDecoder {
 
         // Load decoder blocks
         println!("Loading decoder blocks...");
-        let dims = vec![1536, 768, 384, 192, 96]; // From config analysis
-        let upsample_rates = vec![8, 5, 4, 3]; // From config
+        let dims = [1536, 768, 384, 192, 96]; // From config analysis
+        let upsample_rates = [8, 5, 4, 3]; // From config
         let mut decoder_blocks = Vec::new();
         
         // Initial conv: decoder.decoder.0.conv (1024->1536, kernel=7)
@@ -609,7 +617,7 @@ impl Qwen3SpeechTokenizerDecoder {
                 dims[i],
                 dims[i + 1],
                 upsample_rates[i],
-                vb.pp(&format!("decoder.decoder.{}", i + 1))
+                vb.pp(format!("decoder.decoder.{}", i + 1))
             ) {
                 Ok(block) => {
                     println!("  ✓ Decoder block {} loaded ({} -> {})", i + 1, dims[i], dims[i + 1]);
@@ -645,11 +653,11 @@ impl Qwen3SpeechTokenizerDecoder {
                     stride: 2,
                     ..Default::default()
                 },
-                vb.pp(&format!("decoder.upsample.{}.0", i))
+                vb.pp(format!("decoder.upsample.{}.0", i))
             ).ok();
             let convnext = ConvNeXtBlock::new(
                 1024,
-                vb.pp(&format!("decoder.upsample.{}.1", i))
+                vb.pp(format!("decoder.upsample.{}.1", i))
             ).ok();
             
             if let (Some(conv), Some(block)) = (upsample_conv, convnext) {
@@ -693,10 +701,10 @@ impl Qwen3SpeechTokenizerDecoder {
         println!("  Processing {} tokens with {} quantizers", seq_len, num_quantizers);
 
         // Decode RVQ: Sum embeddings from all quantizers
-        let codebook_dim = self.codebook_embeddings[0].dim(1)?;
+        let _codebook_dim = self.codebook_embeddings[0].dim(1)?;
         let num_codebooks = num_quantizers.min(self.codebook_embeddings.len());
         
-        let device = &self.codebook_embeddings[0].device();
+        let _device = &self.codebook_embeddings[0].device();
         
         // Collect embeddings from each quantizer layer and sum them (residual)
         let mut z: Option<Tensor> = None;
@@ -792,14 +800,14 @@ impl Qwen3SpeechTokenizerDecoder {
         Ok(audio_normalized)
     }
 
+    #[allow(dead_code)]
     pub fn sample_rate(&self) -> usize {
         self.output_sample_rate
     }
 }
 
-#[allow(dead_code)]
-
 // Simple linear interpolation for audio resampling
+#[allow(dead_code)]
 fn interpolate_audio(input: &[f32], target_len: usize) -> Vec<f32> {
     if input.is_empty() {
         return vec![0.0; target_len];

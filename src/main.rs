@@ -7,13 +7,12 @@ mod text_to_speech;
 mod translation;
 
 use anyhow::{Context, Result};
-use audio_capture::AudioCapture;
 use candle_core::Device;
 use clap::{Parser, ValueEnum};
 use cpal::traits::{DeviceTrait, HostTrait};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use speech_to_text::WhisperSpeechToText;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use text_to_speech::PortugueseTTS;
@@ -161,8 +160,8 @@ fn run_text_mode(
 
 fn run_recording_loop(
     device: Device,
-    translation_models_dir: &PathBuf,
-    tts_models_dir: &PathBuf,
+    translation_models_dir: &Path,
+    tts_models_dir: &Path,
 ) -> Result<()> {
     println!("===== Space-Key Recording Mode =====");
     println!("Press SPACE to start/stop recording");
@@ -273,7 +272,7 @@ fn run_recording_loop(
                             // Convert to mono if stereo
                             if channels == 2 {
                                 samples = samples
-                                    .chunks_exact(2)
+                                    .as_chunks::<2>().0.iter()
                                     .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                                     .collect();
                             }
