@@ -50,21 +50,27 @@ impl PortugueseTTS {
         println!("Model config loaded:");
         println!("  Layers: {}", config.talker_config.num_hidden_layers);
         println!("  Hidden size: {}", config.talker_config.hidden_size);
-        println!("  Text hidden size: {}", config.talker_config.text_hidden_size);
+        println!(
+            "  Text hidden size: {}",
+            config.talker_config.text_hidden_size
+        );
         println!("  Heads: {}", config.talker_config.num_attention_heads);
 
         // Load tokenizer - build from vocab and merges files
         let vocab_path = model_path.join("vocab.json");
         let merges_path = model_path.join("merges.txt");
-        
+
         // Build BPE tokenizer from vocab and merges
         let tokenizer: Result<Tokenizer> = Tokenizer::from_file(&vocab_path)
             .or_else(|_| {
                 // Try to create from components if direct load fails
                 use tokenizers::models::bpe::BPE;
-                let bpe = BPE::from_file(&vocab_path.to_string_lossy(), &merges_path.to_string_lossy())
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to build BPE tokenizer: {}", e))?;
+                let bpe = BPE::from_file(
+                    &vocab_path.to_string_lossy(),
+                    &merges_path.to_string_lossy(),
+                )
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build BPE tokenizer: {}", e))?;
                 Ok(Tokenizer::new(bpe))
             })
             .map_err(|e: tokenizers::Error| anyhow::anyhow!("Failed to load tokenizer: {}", e));
@@ -177,11 +183,8 @@ impl PortugueseTTS {
         ];
 
         // Convert text tokens to tensor
-        let text_ids = Tensor::from_vec(
-            text_tokens.to_vec(),
-            (1, text_tokens.len()),
-            &self.device,
-        )?;
+        let text_ids =
+            Tensor::from_vec(text_tokens.to_vec(), (1, text_tokens.len()), &self.device)?;
 
         println!("Running talker model inference...");
 
@@ -190,9 +193,9 @@ impl PortugueseTTS {
         // Increased limit for longer, more natural speech
         // At 12.5Hz frame rate: 200 tokens ≈ 16 seconds of audio
         let max_new_tokens = 200;
-        let temperature = 0.7;  // Lower temperature for more stable generation
-        let top_k = 50;         // Narrower sampling for better quality
-        let top_p = 0.9;        // Nucleus sampling
+        let temperature = 0.7; // Lower temperature for more stable generation
+        let top_k = 50; // Narrower sampling for better quality
+        let top_p = 0.9; // Nucleus sampling
 
         let mut generated_tokens = Vec::new();
 
@@ -208,15 +211,14 @@ impl PortugueseTTS {
             )?;
 
             let total_len = text_tokens.len() + codec_ids_vec.len();
-            let position_ids = Tensor::arange(0u32, total_len as u32, &self.device)?
-                .reshape((1, total_len))?;
+            let position_ids =
+                Tensor::arange(0u32, total_len as u32, &self.device)?.reshape((1, total_len))?;
 
             let logits = self
                 .talker_model
                 .forward(&text_ids, &codec_ids, &position_ids)?;
 
-            let last_logits = logits
-                .i((0, total_len - 1, ..))?;
+            let last_logits = logits.i((0, total_len - 1, ..))?;
 
             let next_token = sample_token(&last_logits, temperature, top_k, top_p)?;
 
@@ -249,14 +251,11 @@ impl PortugueseTTS {
             predictor_input[i] = clamp_codebook_token(token, codebook_vocab);
         }
 
-        let predictor_ids = Tensor::from_vec(
-            predictor_input,
-            (num_quantizers, seq_len),
-            &self.device,
-        )?;
+        let predictor_ids =
+            Tensor::from_vec(predictor_input, (num_quantizers, seq_len), &self.device)?;
 
-        let predictor_position_ids = Tensor::arange(0u32, seq_len as u32, &self.device)?
-            .reshape((1, seq_len))?;
+        let predictor_position_ids =
+            Tensor::arange(0u32, seq_len as u32, &self.device)?.reshape((1, seq_len))?;
 
         println!("Running code predictor...");
         let logits_by_group = self
@@ -265,7 +264,7 @@ impl PortugueseTTS {
 
         // Use actual number of logits returned (may be less than config for 12Hz variant)
         let actual_num_quantizers = logits_by_group.len();
-        
+
         let mut codec_tokens_data = vec![0u32; actual_num_quantizers * seq_len];
         for (i, &token) in generated_tokens.iter().enumerate() {
             codec_tokens_data[i] = clamp_codebook_token(token, codebook_vocab);

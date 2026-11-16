@@ -53,7 +53,9 @@ impl AudioCapture {
         // Convert to mono if stereo
         if spec.channels == 2 {
             samples = samples
-                .as_chunks::<2>().0.iter()
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                 .collect();
         }
@@ -176,7 +178,9 @@ impl AudioCapture {
         // Convert to mono if stereo
         if channels == 2 {
             recorded_samples = recorded_samples
-                .as_chunks::<2>().0.iter()
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                 .collect();
             println!("Converted to mono: {} samples", recorded_samples.len());
@@ -311,7 +315,9 @@ impl AudioCapture {
                                 // Convert to mono if stereo
                                 if channels == 2 {
                                     current_samples = current_samples
-                                        .as_chunks::<2>().0.iter()
+                                        .as_chunks::<2>()
+                                        .0
+                                        .iter()
                                         .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                                         .collect();
                                 }

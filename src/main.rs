@@ -236,7 +236,9 @@ fn run_recording_loop(
                                     move |data: &[u16], _: &cpal::InputCallbackInfo| {
                                         let mut samples = samples_clone.lock().unwrap();
                                         for &sample in data {
-                                            samples.push((sample as f32 / u16::MAX as f32) * 2.0 - 1.0);
+                                            samples.push(
+                                                (sample as f32 / u16::MAX as f32) * 2.0 - 1.0,
+                                            );
                                         }
                                     },
                                     |err| eprintln!("Audio stream error: {}", err),
@@ -244,7 +246,10 @@ fn run_recording_loop(
                                 )?,
                                 _ => {
                                     crossterm::terminal::disable_raw_mode()?;
-                                    anyhow::bail!("Unsupported sample format: {:?}", config.sample_format())
+                                    anyhow::bail!(
+                                        "Unsupported sample format: {:?}",
+                                        config.sample_format()
+                                    )
                                 }
                             };
 
@@ -272,7 +277,9 @@ fn run_recording_loop(
                             // Convert to mono if stereo
                             if channels == 2 {
                                 samples = samples
-                                    .as_chunks::<2>().0.iter()
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
                                     .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
                                     .collect();
                             }
@@ -283,12 +290,19 @@ fn run_recording_loop(
                             }
 
                             // Process the audio through the pipeline
-                            match process_audio_pipeline(&samples, &mut stt, &mut translator, &mut tts) {
+                            match process_audio_pipeline(
+                                &samples,
+                                &mut stt,
+                                &mut translator,
+                                &mut tts,
+                            ) {
                                 Ok((finnish, portuguese)) => {
                                     println!("\n✅ Translation #{} complete!", recording_count);
                                     println!("Finnish: {}", finnish);
                                     println!("Portuguese: {}", portuguese);
-                                    println!("\n🎤 Press SPACE to record again, or 'q' to quit...\n");
+                                    println!(
+                                        "\n🎤 Press SPACE to record again, or 'q' to quit...\n"
+                                    );
                                 }
                                 Err(e) => {
                                     println!("\n❌ Error processing audio: {}", e);
@@ -338,9 +352,12 @@ fn process_audio_pipeline(
     let audio_output = tts.synthesize(&portuguese_text)?;
 
     // Step 4: Play the audio (save to temp file and play)
-    let temp_output = format!("output_{}.wav", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs());
+    let temp_output = format!(
+        "output_{}.wav",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+    );
     tts.save_wav(&audio_output, &temp_output)?;
 
     // Play the audio file

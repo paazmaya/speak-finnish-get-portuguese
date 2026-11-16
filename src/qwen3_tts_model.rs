@@ -361,8 +361,16 @@ impl CodePredictorAttention {
             mrope_section,
         )?;
 
-        let q_norm = Some(RmsNorm::new(head_dim, config.rms_norm_eps, vb.pp("q_norm"))?);
-        let k_norm = Some(RmsNorm::new(head_dim, config.rms_norm_eps, vb.pp("k_norm"))?);
+        let q_norm = Some(RmsNorm::new(
+            head_dim,
+            config.rms_norm_eps,
+            vb.pp("q_norm"),
+        )?);
+        let k_norm = Some(RmsNorm::new(
+            head_dim,
+            config.rms_norm_eps,
+            vb.pp("k_norm"),
+        )?);
 
         Ok(Self {
             q_proj,
@@ -459,9 +467,21 @@ struct CodePredictorMlp {
 impl CodePredictorMlp {
     fn new(config: &CodePredictorConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            gate_proj: linear_no_bias(config.hidden_size, config.intermediate_size, vb.pp("gate_proj"))?,
-            up_proj: linear_no_bias(config.hidden_size, config.intermediate_size, vb.pp("up_proj"))?,
-            down_proj: linear_no_bias(config.intermediate_size, config.hidden_size, vb.pp("down_proj"))?,
+            gate_proj: linear_no_bias(
+                config.hidden_size,
+                config.intermediate_size,
+                vb.pp("gate_proj"),
+            )?,
+            up_proj: linear_no_bias(
+                config.hidden_size,
+                config.intermediate_size,
+                vb.pp("up_proj"),
+            )?,
+            down_proj: linear_no_bias(
+                config.intermediate_size,
+                config.hidden_size,
+                vb.pp("down_proj"),
+            )?,
         })
     }
 
@@ -706,7 +726,10 @@ impl Qwen3TTSCodePredictor {
             ) {
                 Ok(emb) => codec_embeddings.push(emb),
                 Err(_) => {
-                    println!("⚠ Only {} codec embeddings found (expected {})", i, config.num_code_groups);
+                    println!(
+                        "⚠ Only {} codec embeddings found (expected {})",
+                        i, config.num_code_groups
+                    );
                     break;
                 }
             }
@@ -715,7 +738,10 @@ impl Qwen3TTSCodePredictor {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         let vb_layers = vb.pp("model.layers");
         for i in 0..config.num_hidden_layers {
-            layers.push(CodePredictorLayer::new(config, vb_layers.pp(i.to_string()))?);
+            layers.push(CodePredictorLayer::new(
+                config,
+                vb_layers.pp(i.to_string()),
+            )?);
         }
 
         let norm = RmsNorm::new(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
@@ -764,7 +790,8 @@ impl Qwen3TTSCodePredictor {
             });
         }
 
-        let mut hidden_states = hidden_states.ok_or_else(|| anyhow::anyhow!("Missing embeddings"))?;
+        let mut hidden_states =
+            hidden_states.ok_or_else(|| anyhow::anyhow!("Missing embeddings"))?;
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states, position_ids, None)?;
         }
