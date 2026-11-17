@@ -24,16 +24,16 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: chainguard-actions/actions-checkout@37298d8de412b35988dd165ffae45f45b329d365 # v7.0.1
         with:
           persist-credentials: false
 
-      # https://github.com/actions-rust-lang/setup-rust-toolchain
+      # https://github.com/chainguard-actions/actions-rust-lang-setup-rust-toolchain
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        uses: chainguard-actions/actions-rust-lang-setup-rust-toolchain@16b7ac9647c85f1db0d7e9dda7a9903702f4b3d2 # v2.0.1
         with:
           components: clippy, rustfmt
       
-      # https://github.com/astral-sh/setup-uv
+      # https://github.com/chainguard-actions/astral-sh-setup-uv
       - name: Set up uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        uses: chainguard-actions/astral-sh-setup-uv@d074662c6bd48040f94d5f5eeae1479d285f0177 # v10.3.3
